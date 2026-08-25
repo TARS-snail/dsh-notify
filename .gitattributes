@@ -1,0 +1,7 @@
+# Explicit language mapping for GitHub's Linguist. The plugin's sources are
+# TypeScript (host + client half) and plain-ESM JavaScript (tests / build
+# scripts); declaring them keeps the repo's language bar deterministic and
+# independent of Linguist's async statistics job.
+*.ts   linguist-language=TypeScript
+*.mjs  linguist-language=JavaScript
+*.yml  linguist-language=YAML
