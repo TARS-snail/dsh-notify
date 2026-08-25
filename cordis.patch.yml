@@ -1,0 +1,24 @@
+# dsh-notify bundle patch: one insert over the profile's composed entry list.
+#
+# The row activates once the harness provides the `sessions` service (always
+# present in `@deepseek-ai/dsh-base`, the first bundle of every profile), and
+# observes the session event log from there — no further setup is required.
+# Later layers (the profile's own cordis.patch.yml) can override this row's
+# `config` by id; the plugin schema fills in any omitted fields.
+#
+# Example with a custom backend:
+# - insert:
+#     - id: notify
+#       name: dsh-notify
+#       config:
+#         backend: command
+#         command: 'notify-send -u critical "{title}" "{message}"'
+#         urgency: normal
+#         onGoalComplete: true
+#         onTurnComplete: true
+#         onUserQuestion: true
+#         debounceMs: 1000
+- insert:
+    - id: notify
+      name: dsh-notify
+      config: {}
