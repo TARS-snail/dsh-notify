@@ -1,17 +1,25 @@
 /**
  * Runtime tests for dsh-notify.
  *
- * Runs the built plugin (lib/) on a bare Cordis root context with a fake
- * `sessions` service and drives it with synthetic session events, asserting
- * which notifications the console backend emits. A capturing logger exporter
- * takes the place of the harness's log target. No LLM, no harness boot.
+ * Host side: the built plugin runs on a bare Cordis root context with fake
+ * `sessions` and (for the rpc row) `connection` services, driven by synthetic
+ * session events and synthetic presence reports, asserting which
+ * notifications the console backend emits.
+ *
+ * Client side: the built `window.__ModuleLoader__` bundle registers against a
+ * mocked loader, and its `apply` runs against mocked DOM/connection/services,
+ * asserting which presence reports leave the page.
+ *
+ * No LLM, no harness boot, no real sound or desktop notifications.
  *
  * Usage: npm test   (builds lib/ first, then runs this file)
  */
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../lib/index.js'
+import * as rpcPlugin from '../lib/rpc.js'
 import { Notifier, renderCommand } from '../lib/notify.js'
+import { PresenceStore, parsePresenceReport } from '../lib/presence.js'
 
 const tests = []
 const test = (name, fn) => tests.push({ name, fn })
@@ -33,15 +41,15 @@ function lines(messages) {
     .join(' '))
 }
 
-/** Fire a session/event through the context with a minimal fake session.
- *  Cordis treats the first object argument as the dispatch `this` (the
- *  scope carrier the real SessionStore emits through); the session itself
- *  is then the first listener argument. */
 /** Only real notification lines (title | message), excluding boot diagnostics. */
 function notifications(messages) {
   return lines(messages).filter((line) => line.includes('[dsh-notify]') && line.includes('|'))
 }
 
+/** Fire a session/event through the context with a minimal fake session.
+ *  Cordis treats the first object argument as the dispatch `this` (the
+ *  scope carrier the real SessionStore emits through); the session itself
+ *  is then the first listener argument. */
 function emit(ctx, event) {
   ctx.emit({}, 'session/event', { id: 'session-test-1' }, event)
 }
@@ -53,12 +61,14 @@ const TURN_COMPLETED = (turn = 2) => ({
   data: { turn, reason: { kind: 'completed' } },
 })
 
+// ---------------------------------------------------------------- host: triggers
+
 test('notifies when a turn completes normally', async () => {
   const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
   emit(ctx, TURN_COMPLETED(3))
   const output = notifications(messages)
   assert.ok(
-    output.some((line) => line.includes('[dsh-notify]') && line.includes('回答完成') && line.includes('第 3 轮已完成')),
+    output.some((line) => line.includes('回答完成') && line.includes('第 3 轮已完成')),
     `expected turn-complete notification, got: ${JSON.stringify(output)}`,
   )
 })
@@ -268,6 +278,293 @@ test('drops session state when the session is disposed', async () => {
   )
 })
 
+// ------------------------------------------------------------ host: presence
+
+test('notifies by default when no client reports presence (empty store)', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
+  emit(ctx, TURN_COMPLETED(2))
+  assert.equal(notifications(messages).length, 1)
+})
+
+test('suppresses notifications while a visible client attends the session', async () => {
+  const ctx = new Context()
+  ctx.provide('sessions', {})
+  const messages = []
+  ctx.logger.exporter({ export: (message) => messages.push(message) })
+  const rpc = { captured: undefined }
+  ctx.provide('connection', {
+    rpc: {
+      handle: (channel, handler, options) => {
+        rpc.captured = { channel, handler, options }
+      },
+    },
+  })
+  await ctx.plugin(plugin, { backend: 'console', debounceMs: 0, presenceTtlMs: 60_000 })
+  await ctx.plugin(rpcPlugin)
+  assert.equal(rpc.captured.channel, '/dsh-notify')
+  assert.equal(rpc.captured.options.authority, 'loopback')
+
+  // A visible browser tab is displaying this session.
+  const result = await rpc.captured.handler('presence', {
+    clientId: 'c1', sessionId: 'session-test-1', visible: true,
+  })
+  assert.deepEqual(result, { ok: true, value: null })
+  emit(ctx, TURN_COMPLETED(2))
+  assert.equal(notifications(messages).length, 0,
+    `attended session must stay silent, got: ${JSON.stringify(lines(messages))}`)
+
+  // The user switches away: same session, hidden page → notify again.
+  await rpc.captured.handler('presence', {
+    clientId: 'c1', sessionId: 'session-test-1', visible: false,
+  })
+  emit(ctx, TURN_COMPLETED(3))
+  assert.equal(notifications(messages).length, 1,
+    `hidden page must notify, got: ${JSON.stringify(lines(messages))}`)
+})
+
+test('still notifies when a visible client attends a different session', async () => {
+  const ctx = new Context()
+  ctx.provide('sessions', {})
+  const messages = []
+  ctx.logger.exporter({ export: (message) => messages.push(message) })
+  let handler = undefined
+  ctx.provide('connection', {
+    rpc: { handle: (_channel, h) => { handler = h } },
+  })
+  await ctx.plugin(plugin, { backend: 'console', debounceMs: 0, presenceTtlMs: 60_000 })
+  await ctx.plugin(rpcPlugin)
+  await handler('presence', { clientId: 'c1', sessionId: 'some-other-session', visible: true })
+  emit(ctx, TURN_COMPLETED(2))
+  assert.equal(notifications(messages).length, 1,
+    `another session being viewed must not suppress this one, got: ${JSON.stringify(lines(messages))}`)
+})
+
+test('onlyWhenAway: false notifies even while attended', async () => {
+  const ctx = new Context()
+  ctx.provide('sessions', {})
+  const messages = []
+  ctx.logger.exporter({ export: (message) => messages.push(message) })
+  let handler = undefined
+  ctx.provide('connection', {
+    rpc: { handle: (_channel, h) => { handler = h } },
+  })
+  await ctx.plugin(plugin, { backend: 'console', debounceMs: 0, presenceTtlMs: 60_000, onlyWhenAway: false })
+  await ctx.plugin(rpcPlugin)
+  await handler('presence', { clientId: 'c1', sessionId: 'session-test-1', visible: true })
+  emit(ctx, TURN_COMPLETED(2))
+  assert.equal(notifications(messages).length, 1)
+})
+
+test('rpc rejects malformed presence payloads with bad-request', async () => {
+  const ctx = new Context()
+  ctx.provide('sessions', {})
+  const messages = []
+  ctx.logger.exporter({ export: (message) => messages.push(message) })
+  let handler = undefined
+  ctx.provide('connection', {
+    rpc: { handle: (_channel, h) => { handler = h } },
+  })
+  await ctx.plugin(plugin, { backend: 'console', debounceMs: 0 })
+  await ctx.plugin(rpcPlugin)
+  const result = await handler('presence', { clientId: 42, sessionId: null, visible: true })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'bad-request')
+  assert.equal(notifications(messages).length, 0)
+})
+
+// ------------------------------------------------------- presence store (unit)
+
+test('PresenceStore expires stale clients', () => {
+  let now = 0
+  const store = new PresenceStore(1000, () => now)
+  store.report({ clientId: 'c1', sessionId: 's1', visible: true })
+  now = 500
+  assert.equal(store.isAttended('s1'), true)
+  now = 1600
+  assert.equal(store.isAttended('s1'), false, 'stale report must stop suppressing')
+  assert.equal(store.size(), 0)
+})
+
+test('PresenceStore ignores hidden and other-session clients', () => {
+  const store = new PresenceStore(60_000)
+  store.report({ clientId: 'c1', sessionId: 's1', visible: false })
+  store.report({ clientId: 'c2', sessionId: 's2', visible: true })
+  store.report({ clientId: 'c3', sessionId: null, visible: true })
+  assert.equal(store.isAttended('s1'), false)
+  assert.equal(store.isAttended('s2'), true)
+})
+
+test('parsePresenceReport validates payloads', () => {
+  assert.deepEqual(
+    parsePresenceReport({ clientId: 'c1', sessionId: 's1', visible: true }),
+    { clientId: 'c1', sessionId: 's1', visible: true },
+  )
+  assert.deepEqual(
+    parsePresenceReport({ clientId: 'c1', sessionId: null, visible: false }),
+    { clientId: 'c1', sessionId: null, visible: false },
+  )
+  for (const bad of [
+    null,
+    {},
+    { clientId: '', sessionId: null, visible: true },
+    { clientId: 'c1', sessionId: 7, visible: true },
+    { clientId: 'c1', sessionId: null, visible: 'yes' },
+  ]) {
+    assert.throws(() => parsePresenceReport(bad), TypeError)
+  }
+})
+
+// ------------------------------------------------------------- client (browser)
+
+/** Minimal DOM event-target double. */
+function makeTarget() {
+  const listeners = new Map()
+  return {
+    listeners,
+    addEventListener(type, fn) {
+      const list = listeners.get(type) ?? []
+      list.push(fn)
+      listeners.set(type, list)
+    },
+    removeEventListener(type, fn) {
+      const list = listeners.get(type)
+      if (!list) return
+      const index = list.indexOf(fn)
+      if (index >= 0) list.splice(index, 1)
+    },
+    fire(type) {
+      for (const fn of [...(listeners.get(type) ?? [])]) fn()
+    },
+  }
+}
+
+/** Load the built client bundle against a mocked ModuleLoader and apply it. */
+async function applyClient({ visibilityState = 'visible', focused = true, current } = {}) {
+  const calls = []
+  let captured = undefined
+  globalThis.window = {
+    __ModuleLoader__: {
+      load({ id, factory }) {
+        captured = factory((specifier) => {
+          throw new Error(`unexpected require(${specifier})`)
+        })
+      },
+    },
+  }
+  await import(`../lib/client.js?apply=${Math.random().toString(36).slice(2)}`)
+  assert.ok(captured, 'client bundle must register a factory')
+  const documentTarget = makeTarget()
+  const windowTarget = makeTarget()
+  globalThis.document = {
+    visibilityState,
+    hasFocus: () => focused,
+    addEventListener: documentTarget.addEventListener,
+    removeEventListener: documentTarget.removeEventListener,
+  }
+  globalThis.window.addEventListener = windowTarget.addEventListener
+  globalThis.window.removeEventListener = windowTarget.removeEventListener
+
+  let subscribed = undefined
+  let disposer = () => {}
+  const state = { current }
+  const fakeCtx = {
+    connection: {
+      rpc: {
+        call: async (channel, endpoint, payload) => {
+          calls.push({ channel, endpoint, payload })
+          return { ok: true, value: null }
+        },
+      },
+    },
+    sessions: {
+      list: {
+        getSnapshot: () => state,
+        subscribe: (fn) => { subscribed = fn; return () => {} },
+      },
+    },
+    effect: (cb) => { disposer = cb() ?? (() => {}) },
+  }
+  captured.apply(fakeCtx)
+  return { calls, state, documentTarget, windowTarget, fireList: () => subscribed?.(), cleanup: () => disposer() }
+}
+
+test('client reports presence immediately on apply', async () => {
+  const { calls, cleanup } = await applyClient({ current: 'session-7' })
+  try {
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].channel, '/dsh-notify')
+    assert.equal(calls[0].endpoint, 'presence')
+    assert.equal(calls[0].payload.sessionId, 'session-7')
+    assert.equal(calls[0].payload.visible, true)
+    assert.equal(typeof calls[0].payload.clientId, 'string')
+  } finally {
+    cleanup()
+  }
+})
+
+test('client reports visible:false when the tab hides', async () => {
+  const { calls, documentTarget, cleanup } = await applyClient({ current: 'session-7' })
+  try {
+    globalThis.document.visibilityState = 'hidden'
+    documentTarget.fire('visibilitychange')
+    await new Promise((resolve) => setTimeout(resolve, 1200)) // let the throttled report land
+    assert.equal(calls.at(-1).payload.visible, false)
+  } finally {
+    cleanup()
+  }
+})
+
+test('client reports visible:false when the window blurs', async () => {
+  const { calls, windowTarget, cleanup } = await applyClient({ current: 'session-7', focused: true })
+  try {
+    globalThis.document.hasFocus = () => false
+    windowTarget.fire('blur')
+    await new Promise((resolve) => setTimeout(resolve, 1200)) // let the throttled report land
+    assert.equal(calls.at(-1).payload.visible, false)
+  } finally {
+    cleanup()
+  }
+})
+
+test('client reports the new selection when it changes', async () => {
+  const { calls, state, fireList, cleanup } = await applyClient({ current: 'session-a' })
+  try {
+    state.current = 'session-b'
+    fireList()
+    await new Promise((resolve) => setTimeout(resolve, 1200)) // let the throttled report land
+    assert.equal(calls.at(-1).payload.sessionId, 'session-b')
+  } finally {
+    cleanup()
+  }
+})
+
+test('client reports visible:false on pagehide even while visible', async () => {
+  const { calls, windowTarget, cleanup } = await applyClient({ current: 'session-7' })
+  try {
+    windowTarget.fire('pagehide')
+    assert.equal(calls.at(-1).payload.visible, false)
+  } finally {
+    cleanup()
+  }
+})
+
+test('client heartbeats even when state is unchanged', async () => {
+  const { mock } = await import('node:test')
+  mock.timers.enable({ apis: ['setInterval', 'setTimeout'], now: 0 })
+  const { calls, cleanup } = await applyClient({ current: 'session-7' })
+  try {
+    const before = calls.length
+    mock.timers.tick(16_000) // past the 15s heartbeat
+    assert.ok(calls.length > before,
+      `expected a heartbeat refresh with unchanged state, got ${calls.length} calls`)
+  } finally {
+    cleanup()
+    mock.timers.reset()
+  }
+})
+
+// ---------------------------------------------------------------- notifier (unit)
+
 test('renderCommand substitutes both placeholders', () => {
   assert.equal(
     renderCommand('notify-send "{title}" "{message}"', { title: 'a"b', message: 'line1\nline2' }),
@@ -282,6 +579,7 @@ test('Notifier console backend writes through the log sink', () => {
     command: '',
     urgency: 'normal',
     expireMs: 0,
+    playSound: true,
     log: (line) => output.push(line),
   })
   notifier.send({ title: 'T', message: 'M' })
@@ -295,6 +593,7 @@ test('Notifier command backend renders the template', () => {
     command: 'true "{title}"',
     urgency: 'normal',
     expireMs: 0,
+    playSound: false,
     log: (line) => output.push(line),
   })
   notifier.send({ title: 'T', message: 'M' })

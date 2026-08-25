@@ -1,9 +1,11 @@
 # dsh-notify bundle patch: one insert over the profile's composed entry list.
 #
-# The row activates once the harness provides the `sessions` service (always
+# `notify` activates once the harness provides the `sessions` service (always
 # present in `@deepseek-ai/dsh-base`, the first bundle of every profile), and
-# observes the session event log from there — no further setup is required.
-# Later layers (the profile's own cordis.patch.yml) can override this row's
+# observes the session event log from there. `notify-rpc` is the presence
+# transport: it parks until the web Connection service appears, so headless
+# profiles simply run without presence tracking (always "away" → notify).
+# Later layers (the profile's own cordis.patch.yml) can override either row's
 # `config` by id; the plugin schema fills in any omitted fields.
 #
 # Example with a custom backend:
@@ -18,7 +20,11 @@
 #         onTurnComplete: true
 #         onUserQuestion: true
 #         debounceMs: 1000
+#         onlyWhenAway: true
+#         playSound: true
 - insert:
     - id: notify
       name: dsh-notify
       config: {}
+    - id: notify-rpc
+      name: dsh-notify/rpc

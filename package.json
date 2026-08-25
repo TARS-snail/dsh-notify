@@ -1,7 +1,7 @@
 {
   "name": "dsh-notify",
-  "version": "0.1.0",
-  "description": "Desktop notifications for DeepSeek Harness sessions: task completion and user questions",
+  "version": "0.1.1",
+  "description": "Desktop notifications for DeepSeek Harness sessions: task completion and user questions, only while you are away",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -10,6 +10,14 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./rpc": {
+      "types": "./lib/rpc.d.ts",
+      "default": "./lib/rpc.js"
+    },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -17,13 +25,20 @@
     "lib/index.d.ts",
     "lib/notify.js",
     "lib/notify.d.ts",
+    "lib/presence.js",
+    "lib/presence.d.ts",
+    "lib/rpc.js",
+    "lib/rpc.d.ts",
+    "lib/client.js",
+    "lib/client.d.ts",
+    "lib/client.js.map",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "test": "npm run build && node test/notify.test.mjs"
   },
   "keywords": [
@@ -31,6 +46,7 @@
     "dsh",
     "notification",
     "notify-send",
+    "presence",
     "cordis"
   ],
   "license": "MIT",
@@ -40,6 +56,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
     }
   },
   "dependencies": {
@@ -52,7 +75,9 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-connection": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-goal": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-apiproxy": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.0"

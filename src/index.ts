@@ -23,6 +23,7 @@ import type { AssistantMessage, Session, SessionEvent } from '@deepseek-ai/dsh-s
 import type {} from '@deepseek-ai/dsh-goal' // session event-map augmentation for 'goal/change'
 import Schema from '@deepseek-ai/schemastery'
 import { Notifier, type NotifyBackend, type NotifyUrgency } from './notify.js'
+import { PresenceStore } from './presence.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'notify'
@@ -55,6 +56,17 @@ export interface Config {
   previewMaxChars: number
   /** Minimum gap in milliseconds between two notifications of the same kind. */
   debounceMs: number
+  /**
+   * Suppress notifications while a visible browser client is displaying the
+   * session the event belongs to. A background tab or a closed page still
+   * notifies; without any client reports (headless, no browser) everything
+   * notifies.
+   */
+  onlyWhenAway: boolean
+  /** Host-side TTL for presence reports; tabs that stop reporting expire and stop suppressing. */
+  presenceTtlMs: number
+  /** Play the system's default notification sound alongside notifications. */
+  playSound: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -69,6 +81,9 @@ export const Config: Schema<Config> = Schema.object({
   onlyQuestionsWithChoices: Schema.boolean().default(false),
   previewMaxChars: Schema.number().min(1).default(120),
   debounceMs: Schema.number().min(0).default(1000),
+  onlyWhenAway: Schema.boolean().default(true),
+  presenceTtlMs: Schema.number().min(1000).default(45000),
+  playSound: Schema.boolean().default(true),
 })
 
 /** One parsed question from an `ask_user_question` tool call. */
@@ -146,8 +161,16 @@ export function apply(ctx: Context, config: Config) {
     command: config.command,
     urgency: config.urgency,
     expireMs: config.expireMs,
+    playSound: config.playSound,
     log: (line) => logger.info(line),
   })
+
+  // Presence state shared with the `dsh-notify/rpc` plugin (and any future
+  // consumer): browser clients report which session they display and whether
+  // the page is visible; notifications are suppressed while the affected
+  // session is attended.
+  const presence = new PresenceStore(config.presenceTtlMs)
+  ctx.provide('presence', presence)
 
   const sessions = new Map<string, SessionState>()
   const lastSentAt = new Map<string, number>()
@@ -155,7 +178,8 @@ export function apply(ctx: Context, config: Config) {
   logger.info(`[dsh-notify] loaded, backend: ${notifier.backend}`)
 
   /** Debounced send: at most one notification per kind within `debounceMs`. */
-  const send = (kind: string, title: string, message: string) => {
+  const send = (kind: string, title: string, message: string, sessionId?: string) => {
+    if (config.onlyWhenAway && sessionId !== undefined && presence.isAttended(sessionId)) return
     const now = Date.now()
     const previous = lastSentAt.get(kind)
     if (previous !== undefined && now - previous < config.debounceMs) return
@@ -183,12 +207,12 @@ export function apply(ctx: Context, config: Config) {
           const message = state?.lastAssistantText
             ? truncate(state.lastAssistantText, config.previewMaxChars)
             : `第 ${event.data.turn} 轮已完成`
-          send('turn', `${config.titlePrefix} · 回答完成`, message)
+          send('turn', `${config.titlePrefix} · 回答完成`, message, session.id)
           break
         }
         case 'goal/change': {
           if (!config.onGoalComplete || event.data.operation !== 'complete') break
-          send('goal', `${config.titlePrefix} · 任务完成`, truncate(event.data.goal.objective, config.previewMaxChars))
+          send('goal', `${config.titlePrefix} · 任务完成`, truncate(event.data.goal.objective, config.previewMaxChars), session.id)
           break
         }
         case 'tool/call': {
@@ -196,7 +220,7 @@ export function apply(ctx: Context, config: Config) {
           const questions = parseQuestions(event.data.arguments)
           if (!questions) break
           if (config.onlyQuestionsWithChoices && !questions.some((item) => item.options !== undefined)) break
-          send('question', `${config.titlePrefix} · 需要你的回答`, truncate(renderQuestions(questions), config.previewMaxChars * 2))
+          send('question', `${config.titlePrefix} · 需要你的回答`, truncate(renderQuestions(questions), config.previewMaxChars * 2), session.id)
           break
         }
         default:

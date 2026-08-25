@@ -1,6 +1,7 @@
 /**
  * Notification backends for `dsh-notify`: desktop notifications through
- * `notify-send`, an arbitrary user command, or plain console logging.
+ * `notify-send`, an arbitrary user command, or plain console logging, plus
+ * the system's default notification sound.
  *
  * The notifier is deliberately self-contained: it never touches the harness
  * runtime, so the notification path cannot break the session hot path even
@@ -31,11 +32,21 @@ export interface NotifierOptions {
   urgency: NotifyUrgency
   /** `notify-send` display duration in milliseconds; 0 means "until dismissed". */
   expireMs: number
+  /** Play the system's default notification sound alongside real notifications. */
+  playSound: boolean
   /** Sink for console-backend output and diagnostics. */
   log: (line: string) => void
 }
 
 const NOTIFY_SEND_BIN = 'notify-send'
+/** Freedesktop sound-theme file played when no theme-aware player exists. */
+const DEFAULT_SOUND_FILE = '/usr/share/sounds/freedesktop/stereo/message.oga'
+
+/** One resolved sound player: the command plus its fixed arguments. */
+interface SoundPlayer {
+  command: string
+  args: string[]
+}
 
 /** Whether a command is resolvable through the login shell's PATH. */
 function commandAvailable(bin: string): boolean {
@@ -48,6 +59,19 @@ function commandAvailable(bin: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Pick the first available sound player; undefined when none exists. */
+function resolveSoundPlayer(): SoundPlayer | undefined {
+  if (process.platform === 'win32') return undefined
+  if (commandAvailable('canberra-gtk-play')) {
+    // libcanberra plays the sound-theme sound by id — the true "system default".
+    return { command: 'canberra-gtk-play', args: ['-i', 'message'] }
+  }
+  for (const command of ['pw-play', 'paplay']) {
+    if (commandAvailable(command)) return { command, args: [DEFAULT_SOUND_FILE] }
+  }
+  return undefined
 }
 
 /** Substitute the `{title}` / `{message}` placeholders in a command template. */
@@ -82,6 +106,8 @@ function spawnDetached(command: string, args: string[], log: (line: string) => v
  *
  * `auto` prefers `notify-send` and degrades to console output when the binary
  * is missing (e.g. a headless server), so the plugin is always installable.
+ * Sound accompanies desktop deliveries (`notify-send` / `command`) only —
+ * console output is a logging fallback, not a user-facing popup.
  */
 export class Notifier {
   /** Effective backend after `auto` resolution. */
@@ -89,15 +115,20 @@ export class Notifier {
   readonly command: string
   readonly urgency: NotifyUrgency
   readonly expireMs: number
+  private readonly playSound: boolean
   private readonly log: (line: string) => void
   private readonly notifySendAvailable: boolean
+  private readonly soundPlayer: SoundPlayer | undefined
+  private soundMissingLogged = false
 
   constructor(options: NotifierOptions) {
     this.command = options.command
     this.urgency = options.urgency
     this.expireMs = options.expireMs
+    this.playSound = options.playSound
     this.log = options.log
     this.notifySendAvailable = commandAvailable(NOTIFY_SEND_BIN)
+    this.soundPlayer = resolveSoundPlayer()
     if (options.backend === 'auto') {
       if (this.notifySendAvailable) {
         this.backend = 'notify-send'
@@ -127,6 +158,7 @@ export class Notifier {
           notification.title,
           notification.message,
         ], this.log)
+        this.play()
         return
       case 'command': {
         const template = this.command.trim()
@@ -135,8 +167,23 @@ export class Notifier {
           return
         }
         spawnDetached('sh', ['-c', renderCommand(template, notification)], this.log)
+        this.play()
         return
       }
     }
+  }
+
+  /** Play the system default notification sound once per sent notification. */
+  private play(): void {
+    if (!this.playSound) return
+    const player = this.soundPlayer
+    if (player === undefined) {
+      if (!this.soundMissingLogged) {
+        this.log('[dsh-notify] no sound player found (tried canberra-gtk-play / pw-play / paplay) — notifications stay silent')
+        this.soundMissingLogged = true
+      }
+      return
+    }
+    spawnDetached(player.command, player.args, this.log)
   }
 }
