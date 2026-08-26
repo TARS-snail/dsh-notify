@@ -230,6 +230,47 @@ test('ignores other tool calls', async () => {
   assert.equal(notifications(messages).length, 0)
 })
 
+test('notifies when an approval is requested', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
+  emit(ctx, {
+    type: 'approval/asked',
+    seq: 13,
+    time: Date.now(),
+    data: { id: 'approval-1', toolName: 'bash', reason: 'sandbox write outside the workspace' },
+  })
+  const output = notifications(messages)
+  assert.ok(
+    output.some((line) => line.includes('需要审批') && line.includes('bash') && line.includes('sandbox write outside the workspace')),
+    `expected approval notification, got: ${JSON.stringify(output)}`,
+  )
+})
+
+test('approval notification falls back to tool name without a reason', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
+  emit(ctx, {
+    type: 'approval/asked',
+    seq: 13,
+    time: Date.now(),
+    data: { id: 'approval-1', toolName: 'bash' },
+  })
+  const output = notifications(messages)
+  assert.ok(
+    output.some((line) => line.includes('需要审批') && line.includes('请求执行 bash')),
+    `expected tool-name-only approval notification, got: ${JSON.stringify(output)}`,
+  )
+})
+
+test('onApproval: false skips approval notifications', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0, onApproval: false })
+  emit(ctx, {
+    type: 'approval/asked',
+    seq: 13,
+    time: Date.now(),
+    data: { id: 'approval-1', toolName: 'bash', reason: 'needs approval' },
+  })
+  assert.equal(notifications(messages).length, 0)
+})
+
 test('debounces repeated notifications of the same kind', async () => {
   const { ctx, messages } = await boot({ backend: 'console', debounceMs: 60_000 })
   emit(ctx, TURN_COMPLETED(2))

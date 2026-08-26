@@ -10,8 +10,10 @@
  *   goal (the agent's long-running task) was completed.
  * - `tool/call` with `name === 'ask_user_question'` — the agent is waiting
  *   for the human to answer a question / make a choice.
+ * - `approval/asked` — an action exceeds the current approval policy and the
+ *   harness is asking the answerer chain (the human) for a decision.
  *
- * All three triggers are configurable, debounced, and share one notification
+ * All triggers are configurable, debounced, and share one notification
  * backend (`notify-send` on Linux desktops, a custom shell command, or the
  * console). Listener failures are contained so notifications can never break
  * the session.
@@ -21,6 +23,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AssistantMessage, Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-goal' // session event-map augmentation for 'goal/change'
+import type {} from '@deepseek-ai/dsh-user-approval' // session event-map augmentation for 'approval/asked'
 import Schema from '@deepseek-ai/schemastery'
 import { Notifier, type NotifyBackend, type NotifyUrgency } from './notify.js'
 import { PresenceStore } from './presence.js'
@@ -50,6 +53,8 @@ export interface Config {
   onGoalComplete: boolean
   /** Notify when the agent calls `ask_user_question`. */
   onUserQuestion: boolean
+  /** Notify when an action needs user approval (`approval/asked`). */
+  onApproval: boolean
   /** When true, only notify for questions that offer selectable options. */
   onlyQuestionsWithChoices: boolean
   /** Maximum characters of assistant preview / objective kept in the message body. */
@@ -78,6 +83,7 @@ export const Config: Schema<Config> = Schema.object({
   onTurnComplete: Schema.boolean().default(true),
   onGoalComplete: Schema.boolean().default(true),
   onUserQuestion: Schema.boolean().default(true),
+  onApproval: Schema.boolean().default(true),
   onlyQuestionsWithChoices: Schema.boolean().default(false),
   previewMaxChars: Schema.number().min(1).default(120),
   debounceMs: Schema.number().min(0).default(1000),
@@ -221,6 +227,14 @@ export function apply(ctx: Context, config: Config) {
           if (!questions) break
           if (config.onlyQuestionsWithChoices && !questions.some((item) => item.options !== undefined)) break
           send('question', `${config.titlePrefix} · 需要你的回答`, truncate(renderQuestions(questions), config.previewMaxChars * 2), session.id)
+          break
+        }
+        case 'approval/asked': {
+          if (!config.onApproval) break
+          const message = event.data.reason
+            ? `${event.data.toolName}：${event.data.reason}`
+            : `请求执行 ${event.data.toolName}`
+          send('approval', `${config.titlePrefix} · 需要审批`, truncate(message, config.previewMaxChars * 2), session.id)
           break
         }
         default:

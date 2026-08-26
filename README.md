@@ -13,6 +13,7 @@
 | 一轮对话正常结束（agent 回答完毕、回到空闲） | `turn/end`，`reason.kind === 'completed'` | `DSH · 回答完成` + 回答摘要 |
 | 持久化目标（goal）完成 | `goal/change`，`operation === 'complete'` | `DSH · 任务完成` + 目标内容 |
 | agent 调用 `ask_user_question` 向你提问 | `tool/call`，`name === 'ask_user_question'` | `DSH · 需要你的回答` + 问题与选项 |
+| 某个动作超出当前审批策略、需要你审批 | `approval/asked` | `DSH · 需要审批` + 工具名与原因 |
 
 ### 在场检测（presence）——只在离开时打扰
 
@@ -100,6 +101,7 @@ dsh --profile web --patch /path/to/DSH_remind/cordis.patch.yml --dump-config
     onTurnComplete: true
     onGoalComplete: true
     onUserQuestion: true
+    onApproval: true
     onlyQuestionsWithChoices: false
     onlyWhenAway: true
     presenceTtlMs: 45000
@@ -119,6 +121,7 @@ dsh --profile web --patch /path/to/DSH_remind/cordis.patch.yml --dump-config
 | `onTurnComplete` | boolean | `true` | 一轮回答完成时通知 |
 | `onGoalComplete` | boolean | `true` | goal（长期任务）完成时通知 |
 | `onUserQuestion` | boolean | `true` | agent 提问时通知 |
+| `onApproval` | boolean | `true` | 某个动作需要用户审批时通知 |
 | `onlyQuestionsWithChoices` | boolean | `false` | 为 `true` 时只通知带选项（需选择）的问题 |
 | `onlyWhenAway` | boolean | `true` | 为 `true` 时，正在浏览该会话（当前标签页且窗口有焦点）就不弹通知；离开才弹 |
 | `presenceTtlMs` | number | `45000` | 浏览器上报的在场状态有效期（毫秒）；标签页停止上报（崩溃/断连）后超过该时长即视为离开 |
