@@ -129,13 +129,30 @@ dsh --profile web --patch /path/to/DSH_remind/cordis.patch.yml --dump-config
 | `previewMaxChars` | number | `120` | 通知正文中回答摘要/目标内容的截断长度 |
 | `debounceMs` | number | `0` 及以上 | 同类通知的最小间隔（毫秒），避免同一时刻连发多条 |
 
-自定义命令示例（macOS）：
+自定义命令示例（Linux，`command` 后端）：
 
 ```yaml
+# 例 1：通知 + 自定义提示音文件（替换默认提示音）
 config:
   backend: command
-  command: 'osascript -e "display notification \"{message}\" with title \"{title}\""'
+  command: 'notify-send --app-name "DeepSeek Harness" --urgency critical "{title}" "{message}" && paplay "$HOME/.local/share/sounds/custom.oga"'
 ```
+
+```yaml
+# 例 2：通知 + 留痕到日志文件（方便事后回看）
+config:
+  backend: command
+  command: 'notify-send "{title}" "{message}"; echo "$(date "+%F %T") {title} | {message}" >> "$HOME/.local/share/dsh-notify.log"'
+```
+
+```yaml
+# 例 3：用 zenity 弹常驻气泡（不会自动消失，需手动关闭）
+config:
+  backend: command
+  command: 'zenity --notification --text="{title}：{message}"'
+```
+
+> 说明：`command` 模板经 `/bin/sh -c` 执行，`{title}`/`{message}` 会被原样替换，其中的引号/空格转义由你自己负责。绝大多数场景直接用默认 `notify-send` 后端即可，`command` 只在你需要自定义声音、留痕或换通知工具时才用。
 
 ## 工作原理
 
@@ -160,7 +177,7 @@ DSH 会话事件流 (session/event) ──────────────�
 ```sh
 npm install          # 依赖（沙箱环境可加 --cache ./.npm-cache）
 npm run build        # tsc → lib/（宿主）+ lib/client.js（客户端 bundle）
-npm test             # 构建 + 29 个测试（宿主事件/在场抑制/RPC/客户端 DOM 模拟，无需 LLM/网络）
+npm test             # 构建 + 32 个测试（宿主事件/在场抑制/审批触发/客户端 DOM 模拟，无需 LLM/网络）
 ```
 
 测试直接加载构建产物：在裸 Cordis 根上下文上提供假 `sessions`/`connection` 服务，注入合成会话事件与在场上报并断言通知输出；客户端半部在 mock 的 DOM 与 ModuleLoader 上运行。
