@@ -19,7 +19,7 @@ import { parsePresenceReport, type PresenceStore } from './presence.js'
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'notify-rpc'
 /** Connection provides the transport; presence comes from the main plugin. */
-export const inject = ['connection', 'presence']
+export const inject = ['connection', 'presence', 'webServer']
 
 export const CHANNEL = '/dsh-notify'
 export const PRESENCE_ENDPOINT = 'presence'
