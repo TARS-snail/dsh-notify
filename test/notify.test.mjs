@@ -46,12 +46,22 @@ function notifications(messages) {
   return lines(messages).filter((line) => line.includes('[dsh-notify]') && line.includes('|'))
 }
 
+/** A main-session lookalike: real sessions always carry a durable header. */
+const MAIN_SESSION = { id: 'session-test-1', header: {} }
+
+/** A subagent-session lookalike: children are stamped origin: 'subagent'. */
+const SUBAGENT_SESSION = { id: 'session-subagent-1', header: { origin: 'subagent' } }
+
 /** Fire a session/event through the context with a minimal fake session.
  *  Cordis treats the first object argument as the dispatch `this` (the
  *  scope carrier the real SessionStore emits through); the session itself
  *  is then the first listener argument. */
+function emitOn(ctx, session, event) {
+  ctx.emit({}, 'session/event', session, event)
+}
+
 function emit(ctx, event) {
-  ctx.emit({}, 'session/event', { id: 'session-test-1' }, event)
+  emitOn(ctx, MAIN_SESSION, event)
 }
 
 const TURN_COMPLETED = (turn = 2) => ({
@@ -316,6 +326,84 @@ test('drops session state when the session is disposed', async () => {
   assert.ok(
     output.some((line) => line.includes('回答完成') && line.includes('第 3 轮已完成')),
     `expected fallback message after dispose, got: ${JSON.stringify(output)}`,
+  )
+})
+
+// --------------------------------------------------- host: subagent sessions
+// Subagents are real sessions with their own event logs; their milestones must
+// never pop the user-facing notifications. Only top-level sessions notify.
+
+test('ignores turn completion from a subagent session', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
+  emitOn(ctx, SUBAGENT_SESSION, TURN_COMPLETED(3))
+  assert.equal(notifications(messages).length, 0,
+    `subagent turn must stay silent, got: ${JSON.stringify(lines(messages))}`)
+})
+
+test('ignores goal completion from a subagent session', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
+  emitOn(ctx, SUBAGENT_SESSION, {
+    type: 'goal/change',
+    seq: 11,
+    time: Date.now(),
+    data: {
+      kind: 'goal/change',
+      version: 1,
+      operation: 'complete',
+      goal: { id: 'g-sub', revision: 1, objective: '子代理的内部目标', phase: 'completed', maxGoalRounds: 10 },
+      roundsStarted: 2,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    },
+  })
+  assert.equal(notifications(messages).length, 0,
+    `subagent goal must stay silent, got: ${JSON.stringify(lines(messages))}`)
+})
+
+test('ignores nested delegation markers: depth without origin is still a child', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
+  ctx.emit({}, 'session/event', { id: 'session-deep', header: { delegationDepth: 2 } }, TURN_COMPLETED(1))
+  assert.equal(notifications(messages).length, 0)
+})
+
+test('subagent events neither notify nor poison the main-session debounce', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 60_000 })
+  // A subagent finishes several turns while the user is away…
+  emitOn(ctx, SUBAGENT_SESSION, TURN_COMPLETED(1))
+  emitOn(ctx, SUBAGENT_SESSION, TURN_COMPLETED(2))
+  // …then the main session itself answers: exactly one notification.
+  emit(ctx, TURN_COMPLETED(3))
+  const output = notifications(messages)
+  assert.equal(output.length, 1,
+    `expected exactly one main-session notification, got: ${JSON.stringify(lines(messages))}`)
+  assert.ok(
+    output[0].includes('回答完成') && output[0].includes('第 3 轮已完成'),
+    `expected the main-session preview, got: ${JSON.stringify(output)}`,
+  )
+})
+
+test('main session still notifies after a subagent assistant/message state write', async () => {
+  const { ctx, messages } = await boot({ backend: 'console', debounceMs: 0 })
+  emitOn(ctx, SUBAGENT_SESSION, {
+    type: 'assistant/message',
+    seq: 9,
+    time: Date.now(),
+    data: {
+      turn: 2,
+      step: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text: '子代理的中间文本' }] },
+    },
+  })
+  emitOn(ctx, SUBAGENT_SESSION, TURN_COMPLETED(2))
+  // A later main-session turn without its own assistant text must not inherit
+  // the subagent preview.
+  emit(ctx, TURN_COMPLETED(4))
+  const output = notifications(messages)
+  assert.equal(output.length, 1,
+    `expected exactly one notification, got: ${JSON.stringify(lines(messages))}`)
+  assert.ok(
+    output[0].includes('第 4 轮已完成') && !output[0].includes('子代理的中间文本'),
+    `expected the fallback main-session line, got: ${JSON.stringify(output)}`,
   )
 })
 

@@ -8,6 +8,8 @@
 
 ### 触发时机（均可单独开关）
 
+只针对**主会话（顶层会话）**：插件监听的是会话事件流，而每个子代理（subagent）本身也是一个会话、有自己独立的事件日志，因此子代理完成一轮、结束内部任务等也会产生同样的 `turn/end`/`goal/change` 事件。本插件会通过会话头部的 `origin: 'subagent'`（及 `delegationDepth`）标记**跳过所有子代理会话的事件**——只有直接面对你、需要你回应的顶层会话才会触发提醒；委托给子代理的中间过程不会打扰你。
+
 | 触发时机 | 会话事件 | 通知示例 |
 |---|---|---|
 | 一轮对话正常结束（agent 回答完毕、回到空闲） | `turn/end`，`reason.kind === 'completed'` | `DSH · 回答完成` + 回答摘要 |
@@ -162,7 +164,7 @@ config:
  visibility/focus/blur ─┼─► RPC /dsh-notify/presence ─► ctx.presence（TTL 状态表）
  心跳 15s ─────┘                                        │
                                                         ▼
-DSH 会话事件流 (session/event) ─────────────────► 离开检查（isAttended）─► 防抖 ─► 通知 + 提示音
+DSH 会话事件流 (session/event) ──► 顶层会话过滤（跳过子代理）─► 离开检查（isAttended）─► 防抖 ─► 通知 + 提示音
 ```
 
 - 主插件声明 `inject: ['sessions']`：等待 `dsh-session` 服务就绪后加载（每个 profile 的 `dsh-base` 都提供），并提供 `presence` 服务。
@@ -177,7 +179,7 @@ DSH 会话事件流 (session/event) ──────────────�
 ```sh
 npm install          # 依赖（沙箱环境可加 --cache ./.npm-cache）
 npm run build        # tsc → lib/（宿主）+ lib/client.js（客户端 bundle）
-npm test             # 构建 + 32 个测试（宿主事件/在场抑制/审批触发/客户端 DOM 模拟，无需 LLM/网络）
+npm test             # 构建 + 37 个测试（宿主事件/子代理过滤/在场抑制/审批触发/客户端 DOM 模拟，无需 LLM/网络）
 ```
 
 测试直接加载构建产物：在裸 Cordis 根上下文上提供假 `sessions`/`connection` 服务，注入合成会话事件与在场上报并断言通知输出；客户端半部在 mock 的 DOM 与 ModuleLoader 上运行。

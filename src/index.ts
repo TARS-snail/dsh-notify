@@ -18,6 +18,13 @@
  * console). Listener failures are contained so notifications can never break
  * the session.
  *
+ * Only events from a top-level session notify. Subagent children are ordinary
+ * sessions with their own event logs (`turn/end`, `goal/change`, …), so
+ * without filtering every delegated agent would pop the same "回答完成" /
+ * "任务完成" notifications as the conversation itself; those child-session
+ * events are ignored (detected through the durable `origin: 'subagent'`
+ * header marker).
+ *
  * @module dsh-notify
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -201,6 +208,13 @@ export function apply(ctx: Context, config: Config) {
     // `session/event` fires on the append hot path; a notification problem
     // must never leak into the session, so the whole handler is contained.
     try {
+      // Subagent children are ordinary sessions with their own event logs, so
+      // a delegated agent finishing a turn, completing a goal, calling tools,
+      // etc. would otherwise notify exactly like the main conversation. Only
+      // top-level (user-facing) sessions may notify: a child's durable header
+      // carries `origin: 'subagent'` and a positive `delegationDepth`.
+      const header = session.header
+      if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) return
       switch (event.type) {
         case 'assistant/message': {
           const text = plainText(event.data.message.content)
